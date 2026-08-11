@@ -1,5 +1,5 @@
 /**
- * TeleForge AI — Cloudflare Workers AI (Stable Diffusion XL)
+ * AI Assistant — Cloudflare Workers AI (Stable Diffusion XL)
  *
  * Deploy this file as a Cloudflare Worker.
  * It proxies image generation requests from the Telegram bot to Cloudflare's Workers AI.
