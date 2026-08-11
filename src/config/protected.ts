@@ -1,7 +1,7 @@
 export const PROTECTED_CHANNEL = {
-  username: '@TeleforgeOfficial',
-  url: 'https://t.me/TeleforgeOfficial',
-  title: 'TELEFORGE OFFICIAL 🤖',
+  username: '@MaxToolsbd_bot',
+  url: 'https://t.me/MaxToolsbd_bot',
+  title: 'AI Assistant 🤖',
 } as const;
 
 export type ProtectedChannelConfig = typeof PROTECTED_CHANNEL;
