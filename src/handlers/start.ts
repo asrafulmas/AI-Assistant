@@ -28,8 +28,8 @@ export async function startHandler(ctx: Context): Promise<void> {
     });
 
     await ctx.reply(
-      premium('🤖', 'Welcome to TeleForge AI',
-        '\n> Your intelligent AI assistant by **@TeleforgeOfficial**.\n\nChoose an option below 👇'),
+      premium('🤖', 'Welcome to AI Assistant',
+        '\n> Your intelligent AI assistant by **@MaxToolsbd_bot**.\n\nChoose an option below 👇'),
       {
         parse_mode: 'HTML',
         reply_markup: {
