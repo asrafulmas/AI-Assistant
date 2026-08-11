@@ -9,6 +9,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   GOOGLE_API_KEY_1: z.string().min(1, 'GOOGLE_API_KEY_1 is required'),
   GOOGLE_API_KEY_2: z.string().optional().default(''),
+  BAZARLINK_API_KEY: z.string().optional().default(''),
   CLOUDFLARE_AI_URL: z.string().optional().default(''),
   CLOUDFLARE_AI_KEY: z.string().optional().default(''),
   WEBHOOK_SECRET: z.string().optional().default(''),
