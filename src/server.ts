@@ -7,7 +7,7 @@ import { prisma } from './database/prisma';
 import { verifyProtectedChannel } from './config/protected';
 
 async function main(): Promise<void> {
-  logger.info('Starting TeleForge AI...');
+  logger.info('Starting AI Assistant...');
 
   const protectedCheck = verifyProtectedChannel();
   if (!protectedCheck.valid) {
@@ -16,7 +16,7 @@ async function main(): Promise<void> {
     }
     throw new Error(`Protected channel configuration is invalid: ${protectedCheck.errors.join('; ')}`);
   }
-  logger.info({ channel: '@TeleforgeOfficial' }, 'Protected channel verified');
+  logger.info({ channel: '@MaxToolsbd_bot' }, 'Protected channel verified');
 
   const bot = await createBot();
 
