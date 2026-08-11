@@ -263,14 +263,14 @@ async function loadPromptIdentity(): Promise<{
       ]);
 
     return {
-      name: nameSetting?.value ?? 'TeleForge AI',
+      name: nameSetting?.value ?? 'AI Assistant',
       creator:
-        creatorSetting?.value ?? '@TeleforgeOfficial',
+        creatorSetting?.value ?? '@MaxToolsbd_bot',
     };
   } catch {
     return {
-      name: 'TeleForge AI',
-      creator: '@TeleforgeOfficial',
+      name: 'AI Assistant',
+      creator: '@MaxToolsbd_bot',
     };
   }
 }
@@ -643,6 +643,8 @@ export async function generateResponse(
 }
 
 export async function validateAI(): Promise<ValidationResult> {
+  const flashModel: string = CONFIG.AI.MODELS.FLASH;
+
   const result: ValidationResult = {
     key1Valid: false,
     key2Valid: null,
@@ -650,9 +652,7 @@ export async function validateAI(): Promise<ValidationResult> {
     validatedModels: [],
   };
 
-  /*
-   * Validate Gemini Key 1.
-   */
+  // Validate Gemini API Key 1
   if (env.GOOGLE_API_KEY_1) {
     try {
       const client = new GoogleGenerativeAI(
@@ -661,14 +661,12 @@ export async function validateAI(): Promise<ValidationResult> {
 
       await client
         .getGenerativeModel({
-          model: CONFIG.AI.MODELS.FLASH,
+          model: flashModel,
         })
         .generateContent('test');
 
       result.key1Valid = true;
-      result.validatedModels.push(
-        CONFIG.AI.MODELS.FLASH,
-      );
+      result.validatedModels.push(flashModel);
 
       logger.info(
         'Google API Key 1 validation successful',
@@ -685,9 +683,7 @@ export async function validateAI(): Promise<ValidationResult> {
     }
   }
 
-  /*
-   * Validate Gemini Key 2 when configured.
-   */
+  // Validate Gemini API Key 2
   if (env.GOOGLE_API_KEY_2) {
     try {
       const client = new GoogleGenerativeAI(
@@ -696,14 +692,12 @@ export async function validateAI(): Promise<ValidationResult> {
 
       await client
         .getGenerativeModel({
-          model: CONFIG.AI.MODELS.FLASH,
+          model: flashModel,
         })
         .generateContent('test');
 
       result.key2Valid = true;
-      result.validatedModels.push(
-        CONFIG.AI.MODELS.FLASH,
-      );
+      result.validatedModels.push(flashModel);
 
       logger.info(
         'Google API Key 2 validation successful',
@@ -720,13 +714,7 @@ export async function validateAI(): Promise<ValidationResult> {
     }
   }
 
-  /*
-   * BazaarLink is deliberately not added to ValidationResult
-   * because the existing project type only tracks two Gemini keys.
-   *
-   * We still verify that the key exists so the startup logs
-   * clearly show whether the fallback is configured.
-   */
+  // BazaarLink fallback
   if (env.BAZARLINK_API_KEY) {
     logger.info(
       {
