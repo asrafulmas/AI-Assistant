@@ -1,5 +1,5 @@
 @echo off
-title TeleForge AI
+title AI Assistant
 echo Generating Prisma client...
 call npx prisma generate
 echo Pushing schema to database...
