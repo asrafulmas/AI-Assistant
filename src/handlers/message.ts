@@ -359,13 +359,13 @@ async function handleImageGenPrompt(ctx: BotContext, prompt: string, userId: num
       return;
     }
 
-    const msg = await ctx.reply(premium('🖼', 'TeleForge AI', 'Generating your image...'), { parse_mode: 'HTML' });
+    const msg = await ctx.reply(premium('🖼', 'AI Assistant', 'Generating your image...'), { parse_mode: 'HTML' });
 
     const result = await generateImage(prompt);
 
     if (result.success && result.buffer) {
       await ctx.telegram.sendPhoto(ctx.chat!.id, { source: result.buffer }, {
-        caption: premium('🖼', 'AI Generated', `**Prompt**\n\n> ${prompt.slice(0, 200)}${prompt.length > 200 ? '...' : ''}\n\n━━━━━━━━━━━━━━\n\n<i>Powered by @TeleforgeOfficial</i>`),
+        caption: premium('🖼', 'AI Generated', `**Prompt**\n\n> ${prompt.slice(0, 200)}${prompt.length > 200 ? '...' : ''}\n\n━━━━━━━━━━━━━━\n\n<i>Powered by @MaxToolsbd_bot</i>`),
         parse_mode: 'HTML',
       });
     } else {
