@@ -13,7 +13,7 @@ import { withTimeout, formatDuration, sleep } from '../utils/helpers';
 
 const clients: Map<string, GoogleGenerativeAI> = new Map();
 let currentModelName: string = CONFIG.AI.DEFAULT_MODEL;
-let currentApiKeyIndex: 1 | 2 = 1;
+let currentApiKeyIndex: 1 | 2 | 3 = 1;
 let validationResult: ValidationResult | null = null;
 
 const MODEL_FALLBACK_CHAIN = [
