@@ -1,0 +1,9 @@
+@echo off
+title TeleForge AI
+echo Generating Prisma client...
+call npx prisma generate
+echo Pushing schema to database...
+call npx prisma db push --accept-data-loss
+echo Starting bot...
+call npm run dev
+pause

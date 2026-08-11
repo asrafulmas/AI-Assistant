@@ -1,0 +1,128 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            BigInt   @id @default(autoincrement())
+  telegramId    BigInt   @unique
+  firstName     String?
+  lastName      String?
+  username      String?
+  languageCode  String?
+  isPremium     Boolean  @default(false)
+  isAdmin       Boolean  @default(false)
+  isOwner       Boolean  @default(false)
+  premiumUntil  DateTime?
+  isBanned      Boolean  @default(false)
+  totalMessages Int      @default(0)
+  lastActivity  DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  conversations Conversation[]
+  analytics     Analytics[]
+  payments      Payment[]
+  userChannels  UserChannel[]
+}
+
+model Setting {
+  id    BigInt @id @default(autoincrement())
+  key   String @unique
+  value String
+}
+
+model Channel {
+  id          BigInt   @id @default(autoincrement())
+  chatId      String   @unique
+  username    String?
+  title       String?
+  link        String?
+  addedAt     DateTime @default(now())
+
+  userChannels UserChannel[]
+}
+
+model UserChannel {
+  id        BigInt   @id @default(autoincrement())
+  userId    BigInt
+  channelId BigInt
+  isMember  Boolean  @default(false)
+  checkedAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [telegramId], onDelete: Cascade)
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, channelId])
+}
+
+model Conversation {
+  id        BigInt   @id @default(autoincrement())
+  userId    BigInt
+  role      String
+  content   String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [telegramId], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model Payment {
+  id            BigInt   @id @default(autoincrement())
+  userId        BigInt
+  amount        Float
+  currency      String   @default("USD")
+  status        String   @default("pending")
+  provider      String?
+  providerId    String?
+  description   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [telegramId], onDelete: Cascade)
+
+  @@index([userId, status])
+}
+
+model PaymentRequest {
+  id                BigInt    @id @default(autoincrement())
+  userId            BigInt
+  telegramId        BigInt
+  username          String?
+  firstName         String?
+  screenshotFileId  String
+  status            String    @default("PENDING")
+  createdAt         DateTime  @default(now())
+  approvedAt        DateTime?
+  approvedBy        BigInt?
+
+  @@index([userId, status])
+  @@index([status])
+}
+
+model Analytics {
+  id        BigInt   @id @default(autoincrement())
+  userId    BigInt
+  event     String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [telegramId], onDelete: Cascade)
+
+  @@index([event, createdAt, userId])
+}
+
+model Log {
+  id        BigInt   @id @default(autoincrement())
+  level     String
+  message   String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([level, createdAt])
+}
