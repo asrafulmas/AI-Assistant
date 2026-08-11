@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+
 import { env } from '../config/env';
 import { CONFIG } from '../config';
 
@@ -17,67 +18,59 @@ import {
 
 import { prisma } from '../database/prisma';
 import { logger } from '../utils/logger';
-import {
-  withTimeout,
-  sleep,
-} from '../utils/helpers';
+import { withTimeout, sleep } from '../utils/helpers';
 
-type Provider =
-  | 'gemini1'
-  | 'gemini2'
-  | 'bazaarlink';
+type Provider = 'bazaarlink' | 'gemini1' | 'gemini2';
 
 const clients = new Map<string, GoogleGenerativeAI>();
 
-let currentModelName: string =
-  CONFIG.AI.DEFAULT_MODEL;
+let currentModelName = 'google/gemini-2.5-flash';
+let currentProvider: Provider = 'bazaarlink';
+let validationResult: ValidationResult | null = null;
 
-let currentProvider: Provider = 'gemini1';
-
-let validationResult:
-  | ValidationResult
-  | null = null;
+const BAZAARLINK_BASE_URL = 'https://bazaarlink.ai/api/v1';
 
 /*
- * Keep this explicitly typed as string[].
+ * BazaarLink model.
  *
- * This prevents TypeScript from treating
- * MODEL_FALLBACK_CHAIN[index] as possibly undefined.
+ * Full provider/model format is required for reliable routing.
+ *
+ * You can override this on Render with:
+ *
+ * BAZARLINK_MODEL=google/gemini-2.5-flash
+ *
+ * If BAZARLINK_MODEL is not set, this model is used.
  */
-const MODEL_FALLBACK_CHAIN: string[] = [
+const BAZAARLINK_MODEL =
+  process.env.BAZARLINK_MODEL?.trim() || 'google/gemini-2.5-flash';
+
+/*
+ * Optional BazaarLink model fallbacks.
+ *
+ * BazaarLink itself supports a "models" array and will try the
+ * models in order when the primary model fails.
+ *
+ * Keep the primary model first.
+ */
+const BAZAARLINK_FALLBACK_MODELS = [
+  BAZAARLINK_MODEL,
+  'google/gemini-2.5-flash-lite',
+].filter(
+  (model, index, array) => model && array.indexOf(model) === index,
+);
+
+const MODEL_FALLBACK_CHAIN = [
   CONFIG.AI.MODELS.FLASH,
   CONFIG.AI.MODELS.FLASH_LITE,
   CONFIG.AI.MODELS.PRO,
 ];
 
-const PROVIDER_CHAIN: Provider[] = [
-  'gemini1',
-  'gemini2',
-  'bazaarlink',
-];
+const MAX_RETRY_COUNT = CONFIG.MAX_RETRY_COUNT ?? 3;
 
-const BACKOFF_DELAYS: number[] = [
-  1000,
-  2000,
-  4000,
-];
-
-const BAZAARLINK_BASE_URL =
-  'https://bazaarlink.ai/api/v1';
-
-/*
- * BazaarLink model.
- *
- * Render environment variable:
- *
- * BAZARLINK_MODEL=google/gemini-2.5-flash
- *
- * If BAZARLINK_MODEL is not configured,
- * this default will be used.
- */
-const BAZAARLINK_MODEL: string =
-  process.env.BAZARLINK_MODEL ||
-  'google/gemini-2.5-flash';
+const BACKOFF_DELAYS =
+  CONFIG.BACKOFF_DELAYS?.length > 0
+    ? CONFIG.BACKOFF_DELAYS
+    : [1000, 2000, 4000];
 
 const PROMPT_MAP: Record<string, string> = {
   chat: CHAT_PROMPT,
@@ -87,52 +80,14 @@ const PROMPT_MAP: Record<string, string> = {
   file_summary: FILE_SUMMARY_PROMPT,
 };
 
-const LANGUAGE_INSTRUCTION: Record<
-  string,
-  string
-> = {
-  hinglish:
-    '\n\nReply in Hinglish using Roman script only.',
-
-  hindi:
-    '\n\nReply in Hindi only.',
-
-  english:
-    '\n\nReply in English only.',
-
-  arabic:
-    '\n\nReply in Arabic only.',
-
-  french:
-    '\n\nReply in French only.',
-
-  urdu:
-    '\n\nReply in Urdu only.',
+const LANGUAGE_INSTRUCTION: Record<string, string> = {
+  hinglish: '\n\nReply in Hinglish using Roman script only.',
+  hindi: '\n\nReply in Hindi only.',
+  english: '\n\nReply in English only.',
+  arabic: '\n\nReply in Arabic only.',
+  french: '\n\nReply in French only.',
+  urdu: '\n\nReply in Urdu only.',
 };
-
-
-/* =========================================================
-   Utility helpers
-   ========================================================= */
-
-function errorToString(
-  error: unknown,
-): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  if (typeof error === 'string') {
-    return error;
-  }
-
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
 
 function getGeminiApiKey(
   provider: 'gemini1' | 'gemini2',
@@ -144,53 +99,57 @@ function getGeminiApiKey(
   return env.GOOGLE_API_KEY_2 || null;
 }
 
-
-function getClient(
-  apiKey: string,
-): GoogleGenerativeAI {
+function getClient(apiKey: string): GoogleGenerativeAI {
   const existing = clients.get(apiKey);
 
   if (existing) {
     return existing;
   }
 
-  const client =
-    new GoogleGenerativeAI(apiKey);
+  const client = new GoogleGenerativeAI(apiKey);
 
   clients.set(apiKey, client);
 
   return client;
 }
 
-
-/* =========================================================
-   Error handling
-   ========================================================= */
-
-export function categorizeError(
-  error: unknown,
-): ErrorCategory {
+export function categorizeError(error: unknown): ErrorCategory {
   const message =
-    errorToString(error).toLowerCase();
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : String(error).toLowerCase();
 
   if (
     message.includes('401') ||
     message.includes('unauthorized') ||
-    message.includes('permission')
+    message.includes('invalid api key') ||
+    message.includes('invalid_api_key')
   ) {
     return 'auth';
   }
 
   if (
     message.includes('403') ||
-    message.includes('forbidden')
+    message.includes('forbidden') ||
+    message.includes('permission denied')
   ) {
     return 'auth';
   }
 
   if (
+    message.includes('404') ||
+    message.includes('not found') ||
+    message.includes('model not found') ||
+    message.includes('model_not_available') ||
+    message.includes('model_retired')
+  ) {
+    return 'invalid_request';
+  }
+
+  if (
     message.includes('429') ||
     message.includes('rate limit') ||
+    message.includes('rate_limit') ||
     message.includes('too many requests')
   ) {
     return 'rate_limit';
@@ -199,34 +158,22 @@ export function categorizeError(
   if (
     message.includes('quota') ||
     message.includes('resource exhausted') ||
-    message.includes('insufficient')
+    message.includes('insufficient') ||
+    message.includes('credits')
   ) {
     return 'quota';
   }
 
   if (
-    message.includes('404') ||
-    message.includes('not found') ||
-    message.includes('model not found')
-  ) {
-    return 'invalid_request';
-  }
-
-  if (
-    message.includes('400') ||
-    message.includes('bad request') ||
-    message.includes('invalid request')
-  ) {
-    return 'invalid_request';
-  }
-
-  if (
+    message.includes('500') ||
     message.includes('502') ||
     message.includes('503') ||
     message.includes('504') ||
     message.includes('service unavailable') ||
-    message.includes('unavailable') ||
-    message.includes('overloaded')
+    message.includes('temporarily unavailable') ||
+    message.includes('overloaded') ||
+    message.includes('bad gateway') ||
+    message.includes('gateway timeout')
   ) {
     return 'service_unavailable';
   }
@@ -234,14 +181,14 @@ export function categorizeError(
   if (
     message.includes('timeout') ||
     message.includes('timed out') ||
-    message.includes('deadline')
+    message.includes('deadline exceeded') ||
+    message.includes('aborted')
   ) {
     return 'timeout';
   }
 
   return 'unknown';
 }
-
 
 function shouldFallbackProvider(
   category: ErrorCategory,
@@ -253,9 +200,9 @@ function shouldFallbackProvider(
     'service_unavailable',
     'timeout',
     'invalid_request',
+    'unknown',
   ].includes(category);
 }
-
 
 export function getUserFacingError(
   category: ErrorCategory,
@@ -263,7 +210,7 @@ export function getUserFacingError(
   switch (category) {
     case 'auth':
       return (
-        '⚠️ *AI service is temporarily unavailable.*\n\n' +
+        '⚠️ *AI service authentication failed.*\n\n' +
         'Please try again later.'
       );
 
@@ -275,7 +222,7 @@ export function getUserFacingError(
 
     case 'quota':
       return (
-        '⚠️ *API quota exceeded.*\n\n' +
+        '⚠️ *AI service quota is temporarily unavailable.*\n\n' +
         'Please try again later.'
       );
 
@@ -287,14 +234,14 @@ export function getUserFacingError(
 
     case 'timeout':
       return (
-        '⏱️ *Request took too long.*\n\n' +
+        '⏱️ *AI request took too long.*\n\n' +
         'Please try again.'
       );
 
     case 'invalid_request':
       return (
-        '⚠️ *Invalid AI request.*\n\n' +
-        'Please try again.'
+        '⚠️ *The requested AI model is unavailable.*\n\n' +
+        'Please try again later.'
       );
 
     default:
@@ -305,233 +252,59 @@ export function getUserFacingError(
   }
 }
 
-
-/* =========================================================
-   Prompt handling
-   ========================================================= */
-
 async function loadPromptIdentity(): Promise<{
   name: string;
   creator: string;
 }> {
   try {
-    const [
-      nameSetting,
-      creatorSetting,
-    ] = await Promise.all([
-      prisma.setting.findUnique({
-        where: {
-          key: 'bot_name',
-        },
-      }),
-
-      prisma.setting.findUnique({
-        where: {
-          key: 'creator_username',
-        },
-      }),
-    ]);
+    const [nameSetting, creatorSetting] =
+      await Promise.all([
+        prisma.setting.findUnique({
+          where: { key: 'bot_name' },
+        }),
+        prisma.setting.findUnique({
+          where: { key: 'creator_username' },
+        }),
+      ]);
 
     return {
-      name:
-        nameSetting?.value ??
-        'AI Assistant',
-
+      name: nameSetting?.value ?? 'TeleForge AI',
       creator:
-        creatorSetting?.value ??
-        '@MaxToolsbd_bot',
+        creatorSetting?.value ?? '@TeleforgeOfficial',
     };
   } catch {
     return {
-      name: 'AI Assistant',
-      creator: '@MaxToolsbd_bot',
+      name: 'TeleForge AI',
+      creator: '@TeleforgeOfficial',
     };
   }
 }
-
 
 export async function getPromptForMode(
   mode: string,
   language?: string,
 ): Promise<string> {
-  const base =
-    PROMPT_MAP[mode] ??
-    CHAT_PROMPT;
+  const base = PROMPT_MAP[mode] ?? CHAT_PROMPT;
 
-  const identity =
-    await loadPromptIdentity();
+  const identity = await loadPromptIdentity();
 
-  const withIdentity =
-    base
-      .replace(
-        /\{CREATOR\}/g,
-        identity.creator,
-      )
-      .replace(
-        /\{BOT_NAME\}/g,
-        identity.name,
-      );
-
-  const instruction =
-    LANGUAGE_INSTRUCTION[
-      language ?? 'english'
-    ] ??
-    LANGUAGE_INSTRUCTION.english;
+  const withIdentity = base
+    .replace(/\{CREATOR\}/g, identity.creator)
+    .replace(/\{BOT_NAME\}/g, identity.name);
 
   return (
     withIdentity +
-    instruction
+    (
+      LANGUAGE_INSTRUCTION[
+        language ?? 'english'
+      ] ?? LANGUAGE_INSTRUCTION.english
+    )
   );
 }
 
-
-/* =========================================================
-   Gemini
-   ========================================================= */
-
-async function tryGemini(
-  provider: 'gemini1' | 'gemini2',
-  modelName: string,
-  messages: ChatMessage[],
-  systemPrompt: string,
-): Promise<
-  | { result: AIResponse }
-  | { error: ErrorCategory }
-> {
-  const apiKey =
-    getGeminiApiKey(provider);
-
-  if (!apiKey) {
-    logger.warn(
-      { provider },
-      'Gemini provider has no API key',
-    );
-
-    return {
-      error: 'auth',
-    };
-  }
-
-  try {
-    const client =
-      getClient(apiKey);
-
-    const model =
-      client.getGenerativeModel({
-        model: modelName,
-      });
-
-    const history =
-      messages
-        .slice(0, -1)
-        .filter(
-          (msg) =>
-            msg.role === 'user' ||
-            msg.role === 'assistant',
-        )
-        .map((msg) => ({
-          role:
-            msg.role === 'assistant'
-              ? ('model' as const)
-              : ('user' as const),
-
-          parts: [
-            {
-              text: msg.content,
-            },
-          ],
-        }));
-
-    const lastMessage =
-      messages[
-        messages.length - 1
-      ];
-
-    const lastContent =
-      lastMessage?.content ?? '';
-
-    const chat =
-      model.startChat({
-        systemInstruction: {
-          role: 'user',
-          parts: [
-            {
-              text: systemPrompt,
-            },
-          ],
-        },
-
-        generationConfig: {
-          maxOutputTokens:
-            CONFIG.AI.MAX_TOKENS,
-
-          temperature:
-            CONFIG.AI.TEMPERATURE,
-
-          topP:
-            CONFIG.AI.TOP_P,
-
-          topK:
-            CONFIG.AI.TOP_K,
-        },
-
-        history,
-      });
-
-    const result =
-      await withTimeout(
-        chat.sendMessageStream(
-          lastContent,
-        ),
-        CONFIG.AI.TIMEOUT_MS,
-        'Gemini timed out',
-      );
-
-    let text = '';
-
-    for await (
-      const chunk of result.stream
-    ) {
-      text += chunk.text();
-    }
-
-    if (!text.trim()) {
-      throw new Error(
-        'Gemini returned an empty response',
-      );
-    }
-
-    return {
-      result: {
-        text,
-        model: modelName,
-      },
-    };
-  } catch (error) {
-    const category =
-      categorizeError(error);
-
-    logger.error(
-      {
-        provider,
-        model: modelName,
-        category,
-        error:
-          errorToString(error),
-      },
-      'Gemini request failed',
-    );
-
-    return {
-      error: category,
-    };
-  }
-}
-
-
-/* =========================================================
-   BazaarLink
-   ========================================================= */
+/* -------------------------------------------------------------------------- */
+/* BazaarLink                                                                 */
+/* -------------------------------------------------------------------------- */
 
 async function tryBazaarLink(
   messages: ChatMessage[],
@@ -540,126 +313,123 @@ async function tryBazaarLink(
   | { result: AIResponse }
   | { error: ErrorCategory }
 > {
-  const apiKey =
-    env.BAZARLINK_API_KEY;
+  const apiKey = env.BAZARLINK_API_KEY?.trim();
 
   if (!apiKey) {
     logger.warn(
       'BAZARLINK_API_KEY is not configured',
     );
 
-    return {
-      error: 'auth',
-    };
+    return { error: 'auth' };
   }
 
   try {
-    const requestMessages = [
-      {
-        role: 'system',
-        content: systemPrompt,
-      },
-
-      ...messages
-        .filter(
-          (msg) =>
-            msg.role === 'user' ||
-            msg.role === 'assistant',
-        )
-        .map((msg) => ({
-          role: msg.role,
-          content: msg.content,
-        })),
-    ];
-
-    const body = {
-      model: BAZAARLINK_MODEL,
-      messages: requestMessages,
-      stream: false,
-      temperature:
-        CONFIG.AI.TEMPERATURE,
-      max_tokens:
-        CONFIG.AI.MAX_TOKENS,
-      top_p:
-        CONFIG.AI.TOP_P,
-    };
-
     logger.info(
       {
         provider: 'bazaarlink',
         model: BAZAARLINK_MODEL,
       },
-      'Calling BazaarLink fallback',
+      'Trying BazaarLink primary provider',
     );
 
-    const response =
-      await withTimeout(
-        fetch(
-          `${BAZAARLINK_BASE_URL}/chat/completions`,
-          {
-            method: 'POST',
+    const body = {
+      model: BAZAARLINK_MODEL,
 
-            headers: {
-              Authorization:
-                `Bearer ${apiKey}`,
+      /*
+       * BazaarLink can perform model-level fallback itself.
+       * This prevents unnecessary round trips from this service.
+       */
+      models:
+        BAZAARLINK_FALLBACK_MODELS.length > 1
+          ? BAZAARLINK_FALLBACK_MODELS
+          : undefined,
 
-              'Content-Type':
-                'application/json',
-            },
+      stream: false,
 
-            body:
-              JSON.stringify(body),
+      temperature: CONFIG.AI.TEMPERATURE,
+      top_p: CONFIG.AI.TOP_P,
+      max_tokens: CONFIG.AI.MAX_TOKENS,
+
+      messages: [
+        {
+          role: 'system',
+          content: systemPrompt,
+        },
+
+        ...messages.map((message) => ({
+          role:
+            message.role === 'assistant'
+              ? 'assistant'
+              : message.role === 'system'
+                ? 'system'
+                : 'user',
+          content: message.content,
+        })),
+      ],
+    };
+
+    const response = await withTimeout(
+      fetch(
+        `${BAZAARLINK_BASE_URL}/chat/completions`,
+        {
+          method: 'POST',
+
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
           },
-        ),
 
-        CONFIG.AI.TIMEOUT_MS,
-
-        'BazaarLink timed out',
-      );
-
-    const responseText =
-      await response.text();
+          body: JSON.stringify(body),
+        },
+      ),
+      CONFIG.AI.TIMEOUT_MS,
+      'BazaarLink timed out',
+    );
 
     if (!response.ok) {
+      const errorText = await response.text();
+
       throw new Error(
-        `BazaarLink HTTP ${response.status}: ${responseText}`,
+        `BazaarLink HTTP ${response.status}: ${errorText}`,
       );
     }
 
-    let data: {
+    const data = (await response.json()) as {
+      id?: string;
+
+      model?: string;
+
       choices?: Array<{
+        index?: number;
+
         message?: {
-          content?:
-            | string
-            | null;
+          role?: string;
+          content?: string | null;
         };
+
+        finish_reason?: string | null;
       }>;
 
       error?: {
         message?: string;
+        code?: string;
+        type?: string;
       };
     };
 
-    try {
-      data =
-        JSON.parse(
-          responseText,
-        );
-    } catch {
+    if (data.error) {
       throw new Error(
-        'BazaarLink returned invalid JSON',
-      );
-    }
-
-    if (data.error?.message) {
-      throw new Error(
-        `BazaarLink API error: ${data.error.message}`,
+        `BazaarLink API error: ${
+          data.error.message ??
+          data.error.code ??
+          data.error.type ??
+          'Unknown error'
+        }`,
       );
     }
 
     const text =
-      data.choices?.[0]?.message
-        ?.content ?? '';
+      data.choices?.[0]?.message?.content ?? '';
 
     if (!text.trim()) {
       throw new Error(
@@ -667,24 +437,34 @@ async function tryBazaarLink(
       );
     }
 
+    const resolvedModel =
+      data.model || BAZAARLINK_MODEL;
+
+    logger.info(
+      {
+        provider: 'bazaarlink',
+        model: resolvedModel,
+      },
+      'BazaarLink response successful',
+    );
+
     return {
       result: {
         text,
-        model:
-          BAZAARLINK_MODEL,
+        model: resolvedModel,
       },
     };
   } catch (error) {
-    const category =
-      categorizeError(error);
+    const category = categorizeError(error);
 
-    logger.error(
+    logger.warn(
       {
         provider: 'bazaarlink',
-        model: BAZAARLINK_MODEL,
         category,
         error:
-          errorToString(error),
+          error instanceof Error
+            ? error.message
+            : String(error),
       },
       'BazaarLink request failed',
     );
@@ -695,10 +475,161 @@ async function tryBazaarLink(
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Google Gemini                                                              */
+/* -------------------------------------------------------------------------- */
 
-/* =========================================================
-   Main AI generation
-   ========================================================= */
+async function tryGemini(
+  provider: 'gemini1' | 'gemini2',
+  modelName: string,
+  messages: ChatMessage[],
+  systemPrompt: string,
+): Promise<
+  | { result: AIResponse }
+  | { error: ErrorCategory }
+> {
+  const apiKey = getGeminiApiKey(provider);
+
+  if (!apiKey) {
+    return { error: 'auth' };
+  }
+
+  try {
+    logger.info(
+      {
+        provider,
+        model: modelName,
+      },
+      'Trying Google Gemini fallback',
+    );
+
+    const client = getClient(apiKey);
+
+    /*
+     * Google SDK expects the model name without the
+     * "models/" prefix in normal getGenerativeModel usage.
+     *
+     * Keep compatibility with the existing CONFIG values.
+     */
+    const normalizedModel = modelName.startsWith(
+      'models/',
+    )
+      ? modelName.substring(7)
+      : modelName;
+
+    const model = client.getGenerativeModel({
+      model: normalizedModel,
+    });
+
+    const history = messages
+      .slice(0, -1)
+      .filter(
+        (message) =>
+          message.role !== 'system',
+      )
+      .map((message) => ({
+        role:
+          message.role === 'assistant'
+            ? 'model'
+            : 'user',
+
+        parts: [
+          {
+            text: message.content,
+          },
+        ],
+      }));
+
+    const lastMessage =
+      messages[messages.length - 1];
+
+    const lastContent =
+      lastMessage?.content ?? '';
+
+    const chat = model.startChat({
+      systemInstruction: {
+        role: 'user',
+        parts: [
+          {
+            text: systemPrompt,
+          },
+        ],
+      },
+
+      generationConfig: {
+        maxOutputTokens:
+          CONFIG.AI.MAX_TOKENS,
+
+        temperature:
+          CONFIG.AI.TEMPERATURE,
+
+        topP:
+          CONFIG.AI.TOP_P,
+
+        topK:
+          CONFIG.AI.TOP_K,
+      },
+
+      history,
+    });
+
+    const result = await withTimeout(
+      chat.sendMessageStream(lastContent),
+      CONFIG.AI.TIMEOUT_MS,
+      'Gemini timed out',
+    );
+
+    let text = '';
+
+    for await (const chunk of result.stream) {
+      text += chunk.text();
+    }
+
+    if (!text.trim()) {
+      throw new Error(
+        'Google Gemini returned an empty response',
+      );
+    }
+
+    logger.info(
+      {
+        provider,
+        model: normalizedModel,
+      },
+      'Google Gemini fallback successful',
+    );
+
+    return {
+      result: {
+        text,
+        model: normalizedModel,
+      },
+    };
+  } catch (error) {
+    const category = categorizeError(error);
+
+    logger.warn(
+      {
+        provider,
+        model: modelName,
+        category,
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      },
+      'Google Gemini request failed',
+    );
+
+    return {
+      error: category,
+    };
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Main generation                                                           */
+/* -------------------------------------------------------------------------- */
 
 export async function generateResponse(
   messages: ChatMessage[],
@@ -711,113 +642,98 @@ export async function generateResponse(
       language,
     );
 
-  let lastError:
-    ErrorCategory = 'unknown';
+  /*
+   * PRIMARY:
+   *   BazaarLink
+   *
+   * FALLBACK:
+   *   Google API Key 1
+   *   Google API Key 2
+   */
+
+  /* ========================= */
+  /* 1. BAZAARLINK PRIMARY     */
+  /* ========================= */
 
   for (
-    const provider of PROVIDER_CHAIN
+    let attemptNumber = 0;
+    attemptNumber < MAX_RETRY_COUNT;
+    attemptNumber++
   ) {
-    logger.info(
-      { provider },
-      'Trying AI provider',
-    );
+    const attempt =
+      await tryBazaarLink(
+        messages,
+        systemPrompt,
+      );
 
-    /*
-     * BazaarLink is the final fallback.
-     */
+    if ('result' in attempt) {
+      currentProvider = 'bazaarlink';
+      currentModelName =
+        attempt.result.model ??
+        BAZAARLINK_MODEL;
+
+      return attempt.result;
+    }
+
     if (
-      provider === 'bazaarlink'
+      !shouldFallbackProvider(
+        attempt.error,
+      )
     ) {
-      const attempt =
-        await tryBazaarLink(
-          messages,
-          systemPrompt,
-        );
+      break;
+    }
 
-      if (
-        'result' in attempt
-      ) {
-        currentProvider =
-          'bazaarlink';
-
-        currentModelName =
-          attempt.result.model ??
-          BAZAARLINK_MODEL;
-
-        logger.info(
-          {
-            provider:
-              'bazaarlink',
-
-            model:
-              currentModelName,
-          },
-
-          'BazaarLink request succeeded',
-        );
-
-        return attempt.result;
-      }
-
-      lastError =
-        attempt.error;
+    if (
+      attemptNumber <
+      MAX_RETRY_COUNT - 1
+    ) {
+      const delay =
+        BACKOFF_DELAYS[
+          Math.min(
+            attemptNumber,
+            BACKOFF_DELAYS.length - 1,
+          )
+        ] ?? 4000;
 
       logger.warn(
         {
-          provider:
-            'bazaarlink',
-
-          errorCategory:
-            attempt.error,
+          provider: 'bazaarlink',
+          attempt:
+            attemptNumber + 1,
+          delay,
+          error: attempt.error,
         },
-
-        'BazaarLink fallback failed',
+        'Retrying BazaarLink',
       );
 
-      continue;
+      await sleep(delay);
     }
+  }
 
-    /*
-     * Gemini model fallback chain.
-     *
-     * Using for...of instead of array[index]
-     * prevents string | undefined TypeScript errors.
-     */
-    for (
-      const modelName
-      of MODEL_FALLBACK_CHAIN
-    ) {
+  /* ========================= */
+  /* 2. GOOGLE KEY 1           */
+  /* ========================= */
+
+  if (env.GOOGLE_API_KEY_1) {
+    for (const modelName of MODEL_FALLBACK_CHAIN) {
       const attempt =
         await tryGemini(
-          provider,
+          'gemini1',
           modelName,
           messages,
           systemPrompt,
         );
 
-      if (
-        'result' in attempt
-      ) {
+      if ('result' in attempt) {
         currentProvider =
-          provider;
+          'gemini1';
 
         currentModelName =
+          attempt.result.model ??
           modelName;
-
-        logger.info(
-          {
-            provider,
-            model: modelName,
-          },
-
-          'Gemini request succeeded',
-        );
 
         return attempt.result;
       }
-
-      lastError =
-        attempt.error;
 
       if (
         !shouldFallbackProvider(
@@ -826,57 +742,176 @@ export async function generateResponse(
       ) {
         break;
       }
+    }
+  }
 
-      const modelIndex =
-        MODEL_FALLBACK_CHAIN.indexOf(
+  /* ========================= */
+  /* 3. GOOGLE KEY 2           */
+  /* ========================= */
+
+  if (env.GOOGLE_API_KEY_2) {
+    for (const modelName of MODEL_FALLBACK_CHAIN) {
+      const attempt =
+        await tryGemini(
+          'gemini2',
           modelName,
+          messages,
+          systemPrompt,
         );
 
-      if (
-        modelIndex >= 0 &&
-        modelIndex <
-          MODEL_FALLBACK_CHAIN.length - 1
-      ) {
-        const delay =
-          BACKOFF_DELAYS[
-            Math.min(
-              modelIndex,
-              BACKOFF_DELAYS.length - 1,
-            )
-          ] ?? 4000;
+      if ('result' in attempt) {
+        currentProvider =
+          'gemini2';
 
-        await sleep(delay);
+        currentModelName =
+          attempt.result.model ??
+          modelName;
+
+        return attempt.result;
+      }
+
+      if (
+        !shouldFallbackProvider(
+          attempt.error,
+        )
+      ) {
+        break;
       }
     }
   }
 
   throw new Error(
-    getUserFacingError(
-      lastError,
-    ),
+    '⚠️ *All AI providers are temporarily unavailable.*\n\n' +
+      'Please try again later.',
   );
 }
 
-
-/* =========================================================
-   AI validation
-   ========================================================= */
+/* -------------------------------------------------------------------------- */
+/* Validation                                                                 */
+/* -------------------------------------------------------------------------- */
 
 export async function validateAI(): Promise<ValidationResult> {
-  const flashModel: string =
-    CONFIG.AI.MODELS.FLASH;
+  /*
+   * IMPORTANT:
+   *
+   * Validation must NOT make Google keys a requirement.
+   *
+   * BazaarLink is the primary provider.
+   *
+   * Therefore a failed Google validation does not disable
+   * the application.
+   */
 
   const result: ValidationResult = {
     key1Valid: false,
     key2Valid: null,
-    currentModel:
-      currentModelName,
+    currentModel: currentModelName,
     validatedModels: [],
   };
 
-  /*
-   * Google API Key 1
-   */
+  /* ========================= */
+  /* BazaarLink validation      */
+  /* ========================= */
+
+  if (env.BAZARLINK_API_KEY) {
+    try {
+      const response =
+        await withTimeout(
+          fetch(
+            `${BAZAARLINK_BASE_URL}/chat/completions`,
+            {
+              method: 'POST',
+
+              headers: {
+                Authorization: `Bearer ${env.BAZARLINK_API_KEY}`,
+                'Content-Type':
+                  'application/json',
+              },
+
+              body: JSON.stringify({
+                model: BAZAARLINK_MODEL,
+                messages: [
+                  {
+                    role: 'user',
+                    content:
+                      'Reply with exactly: ok',
+                  },
+                ],
+                max_tokens: 10,
+                temperature: 0,
+              }),
+            },
+          ),
+          CONFIG.AI.TIMEOUT_MS,
+          'BazaarLink validation timed out',
+        );
+
+      if (response.ok) {
+        const data =
+          (await response.json()) as {
+            model?: string;
+            choices?: Array<{
+              message?: {
+                content?: string;
+              };
+            }>;
+          };
+
+        const model =
+          data.model ??
+          BAZAARLINK_MODEL;
+
+        result.validatedModels.push(
+          model,
+        );
+
+        currentProvider =
+          'bazaarlink';
+
+        currentModelName =
+          model;
+
+        logger.info(
+          {
+            provider: 'bazaarlink',
+            model,
+          },
+          'BazaarLink validation successful',
+        );
+      } else {
+        const text =
+          await response.text();
+
+        logger.warn(
+          {
+            status:
+              response.status,
+            error: text,
+          },
+          'BazaarLink validation failed',
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : String(error),
+        },
+        'BazaarLink validation failed',
+      );
+    }
+  } else {
+    logger.warn(
+      'BAZARLINK_API_KEY is not configured',
+    );
+  }
+
+  /* ========================= */
+  /* Google Key 1 validation    */
+  /* ========================= */
+
   if (env.GOOGLE_API_KEY_1) {
     try {
       const client =
@@ -884,43 +919,53 @@ export async function validateAI(): Promise<ValidationResult> {
           env.GOOGLE_API_KEY_1,
         );
 
+      const modelName =
+        CONFIG.AI.MODELS.FLASH.startsWith(
+          'models/',
+        )
+          ? CONFIG.AI.MODELS.FLASH.substring(
+              7,
+            )
+          : CONFIG.AI.MODELS.FLASH;
+
       await client
         .getGenerativeModel({
-          model: flashModel,
+          model: modelName,
         })
-        .generateContent(
-          'test',
-        );
+        .generateContent('test');
 
-      result.key1Valid =
-        true;
+      result.key1Valid = true;
 
       result.validatedModels.push(
-        flashModel,
+        modelName,
       );
 
       logger.info(
+        {
+          provider: 'gemini1',
+          model: modelName,
+        },
         'Google API Key 1 validation successful',
       );
     } catch (error) {
-      result.key1Valid =
-        false;
+      result.key1Valid = false;
 
-      logger.error(
+      logger.warn(
         {
           error:
-            errorToString(error),
+            error instanceof Error
+              ? error.message
+              : String(error),
         },
-
-        'API Key 1 validation failed',
+        'Google API Key 1 validation failed',
       );
     }
   }
 
+  /* ========================= */
+  /* Google Key 2 validation    */
+  /* ========================= */
 
-  /*
-   * Google API Key 2
-   */
   if (env.GOOGLE_API_KEY_2) {
     try {
       const client =
@@ -928,186 +973,100 @@ export async function validateAI(): Promise<ValidationResult> {
           env.GOOGLE_API_KEY_2,
         );
 
+      const modelName =
+        CONFIG.AI.MODELS.FLASH.startsWith(
+          'models/',
+        )
+          ? CONFIG.AI.MODELS.FLASH.substring(
+              7,
+            )
+          : CONFIG.AI.MODELS.FLASH;
+
       await client
         .getGenerativeModel({
-          model: flashModel,
+          model: modelName,
         })
-        .generateContent(
-          'test',
-        );
+        .generateContent('test');
 
-      result.key2Valid =
-        true;
+      result.key2Valid = true;
 
       result.validatedModels.push(
-        flashModel,
+        modelName,
       );
 
       logger.info(
+        {
+          provider: 'gemini2',
+          model: modelName,
+        },
         'Google API Key 2 validation successful',
       );
     } catch (error) {
-      result.key2Valid =
-        false;
+      result.key2Valid = false;
 
-      logger.error(
+      logger.warn(
         {
           error:
-            errorToString(error),
+            error instanceof Error
+              ? error.message
+              : String(error),
         },
-
-        'API Key 2 validation failed',
+        'Google API Key 2 validation failed',
       );
     }
   }
 
+  validationResult = result;
 
   /*
-   * BazaarLink
+   * BazaarLink is considered the primary provider.
+   * Do not report "no valid API keys" here.
    *
-   * We only verify that the key exists here.
-   * The actual BazaarLink API is tested when
-   * generateResponse() reaches the fallback.
+   * The actual generateResponse() function performs
+   * the definitive provider test when a user sends a
+   * message.
    */
-  if (
-    env.BAZARLINK_API_KEY
-  ) {
-    logger.info(
-      {
-        model:
-          BAZAARLINK_MODEL,
-      },
-
-      'BazaarLink fallback configured',
-    );
-  } else {
-    logger.warn(
-      'BazaarLink fallback is not configured',
-    );
-  }
-
-
-  /*
-   * Validate available Gemini models.
-   *
-   * Only attempt model validation when
-   * at least one Gemini key exists.
-   */
-  const validationKey =
-    env.GOOGLE_API_KEY_1 ||
-    env.GOOGLE_API_KEY_2;
-
-  if (validationKey) {
-    const client =
-      new GoogleGenerativeAI(
-        validationKey,
-      );
-
-    for (
-      const modelName
-      of MODEL_FALLBACK_CHAIN
-    ) {
-      try {
-        await client
-          .getGenerativeModel({
-            model: modelName,
-          })
-          .generateContent(
-            'test',
-          );
-
-        if (
-          !result.validatedModels.includes(
-            modelName,
-          )
-        ) {
-          result.validatedModels.push(
-            modelName,
-          );
-        }
-
-        logger.info(
-          {
-            model: modelName,
-          },
-
-          'Model validation successful',
-        );
-      } catch (error) {
-        logger.warn(
-          {
-            model: modelName,
-            error:
-              errorToString(error),
-          },
-
-          'Model validation skipped',
-        );
-      }
-    }
-  }
-
-
-  /*
-   * Always use a guaranteed string here.
-   */
-  result.currentModel =
-    currentModelName ||
-    CONFIG.AI.DEFAULT_MODEL;
-
-  validationResult =
-    result;
 
   return result;
 }
 
-
-/* =========================================================
-   Statistics
-   ========================================================= */
+/* -------------------------------------------------------------------------- */
+/* Performance / error tracking                                               */
+/* -------------------------------------------------------------------------- */
 
 const responseTimes: number[] = [];
 
 let lastErrorTimestamp:
-  number | null = null;
+  | number
+  | null = null;
 
 let lastErrorMessage:
-  string | null = null;
-
+  | string
+  | null = null;
 
 export function trackResponseTime(
   ms: number,
 ): void {
   responseTimes.push(ms);
 
-  if (
-    responseTimes.length > 100
-  ) {
+  if (responseTimes.length > 100) {
     responseTimes.shift();
   }
 }
 
-
 export function getAverageResponseTime(): string {
-  if (
-    responseTimes.length === 0
-  ) {
+  if (responseTimes.length === 0) {
     return 'N/A';
   }
 
   const avg =
     responseTimes.reduce(
-      (
-        total,
-        value,
-      ) => total + value,
+      (a, b) => a + b,
       0,
-    ) /
-    responseTimes.length;
+    ) / responseTimes.length;
 
   return `${avg.toFixed(0)}ms`;
 }
-
 
 export function trackError(
   error: string,
@@ -1115,10 +1074,8 @@ export function trackError(
   lastErrorTimestamp =
     Date.now();
 
-  lastErrorMessage =
-    error;
+  lastErrorMessage = error;
 }
-
 
 export function getLastError(): {
   time: string;
@@ -1131,33 +1088,28 @@ export function getLastError(): {
     return null;
   }
 
-  const seconds =
-    Math.floor(
-      (
-        Date.now() -
-        lastErrorTimestamp
-      ) / 1000,
-    );
+  const seconds = Math.floor(
+    (Date.now() -
+      lastErrorTimestamp) /
+      1000,
+  );
 
   return {
     time: `${seconds}s ago`,
-    message:
-      lastErrorMessage,
+    message: lastErrorMessage,
   };
 }
 
-
-/* =========================================================
-   Connection test
-   ========================================================= */
+/* -------------------------------------------------------------------------- */
+/* Connection test                                                            */
+/* -------------------------------------------------------------------------- */
 
 export async function testConnection(): Promise<{
   success: boolean;
   latency: string;
   error?: string;
 }> {
-  const start =
-    Date.now();
+  const start = Date.now();
 
   try {
     await generateResponse(
@@ -1168,59 +1120,51 @@ export async function testConnection(): Promise<{
             'Reply with just: ok',
         },
       ],
-
       'chat',
-
       'english',
     );
 
     return {
       success: true,
-      latency:
-        `${Date.now() - start}ms`,
+      latency: `${Date.now() - start}ms`,
     };
   } catch (error) {
     return {
       success: false,
-
-      latency:
-        `${Date.now() - start}ms`,
-
+      latency: `${Date.now() - start}ms`,
       error:
-        errorToString(error),
+        error instanceof Error
+          ? error.message
+          : 'Unknown error',
     };
   }
 }
 
-
-/* =========================================================
-   Public status functions
-   ========================================================= */
-
 export function getValidationResult():
-  ValidationResult | null {
+  | ValidationResult
+  | null {
   return validationResult;
 }
 
-
 export function getCurrentModelName(): string {
-  return (
-    currentModelName ||
-    CONFIG.AI.DEFAULT_MODEL
-  );
+  return currentModelName;
 }
 
-
 export function getCurrentApiKeyIndex(): number {
-  if (
-    currentProvider === 'gemini1'
-  ) {
+  /*
+   * Existing project code appears to use this as a
+   * provider indicator.
+   *
+   * 1 = Google Key 1
+   * 2 = Google Key 2
+   * 3 = BazaarLink
+   */
+
+  if (currentProvider === 'gemini1') {
     return 1;
   }
 
-  if (
-    currentProvider === 'gemini2'
-  ) {
+  if (currentProvider === 'gemini2') {
     return 2;
   }
 
