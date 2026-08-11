@@ -1,7 +1,7 @@
 {
-  "name": "teleforge-ai",
+  "name": "ai-assistant",
   "version": "1.0.0",
-  "description": "TeleForge AI - Production Telegram Bot with Google AI Studio",
+  "description": "AI Assistant - Production Telegram Bot with Google AI Studio",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
