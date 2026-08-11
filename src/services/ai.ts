@@ -35,7 +35,8 @@ const PROMPT_MAP: Record<string, string> = {
 
 function getApiKey(index: 1 | 2): string | null {
   if (index === 1) return env.GOOGLE_API_KEY_1;
-  if (index === 2) return env.GOOGLE_API_KEY_2 || null;
+  if (index === 2) return env.GOOGLE_API_KEY_2;
+  if (index === 3) return env.BAZARLINK_API_KEY || null;
   return null;
 }
 
