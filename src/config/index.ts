@@ -5,12 +5,13 @@ export const CONFIG = {
     TOP_P: 0.95,
     TOP_K: 40,
     TIMEOUT_MS: 15000,
-    DEFAULT_MODEL: 'models/gemini-2.5-flash',
-    MODELS: {
-      FLASH: 'models/gemini-2.5-flash',
-      FLASH_LITE: 'models/gemini-2.5-flash-lite',
-      PRO: 'models/gemini-2.5-pro',
-    },
+  DEFAULT_MODEL: 'gemini-2.5-flash'
+  
+  MODELS: {
+    FLASH: 'gemini-2.5-flash',
+    FLASH_LITE: 'gemini-2.5-flash-lite',
+    PRO: 'gemini-2.5-pro',
+  },
   },
   BOT: {
     MAX_CONVERSATION_LENGTH: 40,
